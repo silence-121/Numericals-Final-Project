@@ -1,0 +1,928 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, filedialog
+import numpy as np
+import math
+import threading
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+# ─────────────────────────────────────────────
+#  COLOUR PALETTE — BRIGHT THEME
+# ─────────────────────────────────────────────
+BG      = "#f5f7fa"
+PNL     = "#ffffff"
+ENTRY   = "#ffffff"
+ACC_R   = "#3498db"
+ACC_L   = "#2980b9"
+ACC_M   = "#e67e22"
+TXT     = "#2c3e50"
+TXT_DIM = "#7f8c8d"
+BTN_SLV = "#3498db"
+BTN_PLT = "#9b59b6"
+BTN_CLR = "#ecf0f1"
+BORDER  = "#dce1e6"
+# ─────────────────────────────────────────────
+#  MATH HELPERS
+# ─────────────────────────────────────────────
+def safe_eval(x_val: float, eq: str) -> float:
+    eq = eq.replace("^", "**")
+    allowed = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
+    allowed["x"] = x_val
+    try:
+        result = eval(eq, {"__builtins__": {}}, allowed)
+        if not math.isfinite(result):
+            raise ValueError("Result is inf or NaN")
+        return float(result)
+    except Exception as e:
+        raise ValueError(f"Bad equation: {e}")
+def num_deriv(x_val, eq):
+    h = 1e-5
+    return (safe_eval(x_val + h, eq) - safe_eval(x_val - h, eq)) / (2 * h)
+def stop_crit(ea, fval, tol=0.001):
+    return abs(fval) < tol or (ea != 0 and ea < tol)
+def fmt(v):
+    try:
+        return f"{float(v):.4f}"
+    except Exception:
+        return str(v)
+# ─────────────────────────────────────────────
+#  ROOT-FINDING METHODS
+# ─────────────────────────────────────────────
+def m_bisection(eq, xl, xu, tol=0.001, max_iter=50):
+    cols = ["Iter","XL","XR","XU","f(XL)","f(XR)","Ea(%)","f(XL)*f(XR)","Remark"]
+    rows = []; xr_old = None
+    for i in range(1, max_iter + 1):
+        xr = (xl + xu) / 2
+        fxl = safe_eval(xl, eq); fxr = safe_eval(xr, eq)
+        ea = 0.0
+        if xr_old is not None and xr != 0:
+            ea = abs((xr - xr_old) / xr) * 100
+        prod = fxl * fxr
+        remark = "Left" if prod < 0 else "Right"
+        rows.append([i, fmt(xl), fmt(xr), fmt(xu), fmt(fxl), fmt(fxr), fmt(ea), fmt(prod), remark])
+        if stop_crit(ea, fxr, tol): break
+        if prod < 0: xu = xr
+        else: xl = xr
+        xr_old = xr
+    return float(rows[-1][2]), rows, cols
+def m_false_pos(eq, xl, xu, tol=0.001, max_iter=50):
+    cols = ["Iter","XL","XU","XR","Ea(%)","f(XL)","f(XU)","f(XR)","f(XL)*f(XR)","Remark"]
+    rows = []; xr_old = None
+    for i in range(1, max_iter + 1):
+        fxl = safe_eval(xl, eq); fxu = safe_eval(xu, eq)
+        if fxl - fxu == 0:
+            raise ValueError("Division by zero (f(XL) = f(XU)).")
+        xr = (xu * fxl - xl * fxu) / (fxl - fxu)
+        fxr = safe_eval(xr, eq)
+        ea = 0.0
+        if xr_old is not None and xr != 0:
+            ea = abs((xr - xr_old) / xr) * 100
+        prod = fxl * fxr
+        remark = "Left" if prod < 0 else ("Right" if prod > 0 else "Root")
+        rows.append([i, fmt(xl), fmt(xu), fmt(xr), fmt(ea),
+                     fmt(fxl), fmt(fxu), fmt(fxr), fmt(prod), remark])
+        if stop_crit(ea, fxr, tol): break
+        if prod < 0: xu = xr
+        else: xl = xr
+        xr_old = xr
+    return float(rows[-1][3]), rows, cols
+def m_secant(eq, x0, x1, tol=0.001, max_iter=50):
+    cols = ["Iter","Xi-1","Xi","Xi+1","Ea(%)","f(Xi-1)","f(Xi)","f(Xi+1)"]
+    rows = []
+    for i in range(1, max_iter + 1):
+        f0 = safe_eval(x0, eq); f1 = safe_eval(x1, eq)
+        if f0 - f1 == 0:
+            raise ValueError("Division by zero in Secant (f(Xi-1) = f(Xi)).")
+        x2 = x1 - f1 * (x0 - x1) / (f0 - f1)
+        f2 = safe_eval(x2, eq)
+        ea = abs((x2 - x1) / x2) * 100 if x2 != 0 else 0.0
+        rows.append([i, fmt(x0), fmt(x1), fmt(x2), fmt(ea), fmt(f0), fmt(f1), fmt(f2)])
+        if stop_crit(ea, f2, tol): break
+        x0, x1 = x1, x2
+    return float(rows[-1][3]), rows, cols
+def m_newton(eq, x0, tol=0.001, max_iter=50):
+    cols = ["Iter","Xi","Ea(%)","f(Xi)","f'(Xi)","Xi+1"]
+    rows = []
+    for i in range(1, max_iter + 1):
+        fx = safe_eval(x0, eq); dfx = num_deriv(x0, eq)
+        if dfx == 0:
+            raise ValueError("Division by zero (f'(x) = 0). Try a different initial guess.")
+        x1 = x0 - fx / dfx
+        ea = abs((x1 - x0) / x1) * 100 if x1 != 0 else 0.0
+        rows.append([i, fmt(x0), fmt(ea), fmt(fx), fmt(dfx), fmt(x1)])
+        if stop_crit(ea, fx, tol): break
+        x0 = x1
+    return float(rows[-1][5]), rows, cols
+def m_incremental(eq, x0, step, tol=0.001, max_iter=50, refine_passes=4):
+    cols = ["Iter","XL","DX","XU","f(XL)","f(XU)","f(XL)*f(XU)","Remark"]
+    rows = []; root = None
+    iter_no = 0
+    current_step = step
+    for _ in range(refine_passes + 1):
+        sign_changed = False
+        while iter_no < max_iter:
+            iter_no += 1
+            x1 = x0 + current_step
+            f0 = safe_eval(x0, eq); f1 = safe_eval(x1, eq)
+            prod = f0 * f1
+            if abs(f1) < tol:
+                rows.append([iter_no, fmt(x0), fmt(current_step), fmt(x1),
+                             fmt(f0), fmt(f1), fmt(prod), "Root found"])
+                return x1, rows, cols
+            if prod < 0:
+                rows.append([iter_no, fmt(x0), fmt(current_step), fmt(x1),
+                             fmt(f0), fmt(f1), fmt(prod),
+                             f"Sign change -> refine (dx = {current_step/10:.5f})"])
+                current_step = current_step / 10
+                sign_changed = True
+                break
+            else:
+                rows.append([iter_no, fmt(x0), fmt(current_step), fmt(x1),
+                             fmt(f0), fmt(f1), fmt(prod), "No root in interval"])
+                x0 = x1
+        if not sign_changed:
+            break
+    if rows:
+        try:
+            root = (float(rows[-1][1]) + float(rows[-1][3])) / 2
+        except Exception:
+            root = None
+    return root, rows, cols
+# ─────────────────────────────────────────────
+#  MATRIX HELPERS
+# ─────────────────────────────────────────────
+def parse_matrix(text):
+    rows = [r.strip() for r in text.strip().split(";") if r.strip()]
+    arr = np.array([[float(v) for v in r.split()] for r in rows])
+    if arr.ndim != 2:
+        raise ValueError("Invalid matrix format.")
+    return arr
+def format_matrix(M):
+    if np.isscalar(M) or (isinstance(M, np.ndarray) and M.ndim == 0):
+        return f"  {float(M):.4f}"
+    return "\n".join("  " + "   ".join(f"{v:12.4f}" for v in row)
+                     for row in np.atleast_2d(M))
+def minor(M, i, j):
+    sub = np.delete(np.delete(M, i, axis=0), j, axis=1)
+    return np.linalg.det(sub)
+def cofactor_matrix(M):
+    n = M.shape[0]
+    C = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            C[i, j] = ((-1) ** (i + j)) * minor(M, i, j)
+    return C
+def adjoint_matrix(M):
+    return cofactor_matrix(M).T
+def det_cofactor_expansion(M):
+    n = M.shape[0]
+    if n == 1:
+        return float(M[0, 0]), [f"  |M| = {float(M[0,0]):.4f}"]
+    if n == 2:
+        v = float(M[0,0]*M[1,1] - M[0,1]*M[1,0])
+        return v, [f"  ad - bc = {M[0,0]:.2f}*{M[1,1]:.2f} - {M[0,1]:.2f}*{M[1,0]:.2f} = {v:.4f}"]
+    total = 0.0
+    steps = []
+    for j in range(n):
+        sign = (-1) ** j
+        m_ij = minor(M, 0, j)
+        term = sign * M[0, j] * m_ij
+        total += term
+        steps.append(f"  ({'+' if sign>0 else '-'}) {M[0,j]:.4f} x M[0,{j}] = {term:+.4f}")
+    return total, steps
+# ─────────────────────────────────────────────
+#  PLOT
+# ─────────────────────────────────────────────
+def do_plot(eq, iter_points=None, method_name=""):
+    try:
+        import matplotlib
+        try:
+            matplotlib.use("TkAgg")
+        except Exception:
+            pass
+        import matplotlib.pyplot as plt
+        import matplotlib.patheffects as pe
+        from matplotlib.widgets import Button
+        from matplotlib.patches import Rectangle
+
+        X_MIN, X_MAX = -10.0, 10.0
+        N_PTS = 4000
+
+        def build_curve(xmin, xmax):
+            xs = np.linspace(xmin, xmax, N_PTS)
+            ys = []
+            for xv in xs:
+                try: ys.append(safe_eval(float(xv), eq))
+                except: ys.append(float("nan"))
+            return xs, np.array(ys)
+
+        x_vals, y_vals = build_curve(X_MIN, X_MAX)
+        fig = plt.figure(figsize=(10, 7), facecolor="#f5f7fa")
+        ax  = fig.add_axes([0.08, 0.12, 0.88, 0.80])
+        ax.set_facecolor("#ffffff")
+        curve_line, = ax.plot(x_vals, y_vals, color="#3498db", linewidth=2.2,
+                              label=f"f(x) = {eq}", zorder=2)
+        ax.axhline(0, color="#7f8c8d", linewidth=0.7, linestyle="--", zorder=1)
+        ax.axvline(0, color="#7f8c8d", linewidth=0.7, linestyle="--", zorder=1)
+
+        dot_xy, dot_labels = [], []
+        if iter_points:
+            n = len(iter_points)
+            cmap = plt.cm.Blues
+            for idx, (it_num, xp) in enumerate(iter_points):
+                try: yp = safe_eval(float(xp), eq)
+                except: continue
+                color = cmap(0.4 + 0.6 * idx / max(n - 1, 1))
+                ax.scatter(xp, yp, color=color, s=90, zorder=5,
+                           edgecolors="#2c3e50", linewidths=0.8, picker=5)
+                dot_xy.append((xp, yp)); dot_labels.append(str(it_num))
+                txt = ax.text(xp, yp, f" {it_num}", color="#2c3e50", fontsize=8,
+                              fontweight="bold", va="bottom", zorder=6, fontfamily="Consolas")
+                txt.set_path_effects([pe.withStroke(linewidth=2, foreground="#ffffff")])
+                ax.plot([xp, xp], [0, yp], color="#bdc3c7", linewidth=0.4,
+                        linestyle=":", alpha=0.6, zorder=1)
+
+        title = f"f(x) = {eq}" + (f"  [{method_name}]" if method_name else "")
+        ax.set_title(title, color="#2c3e50", fontsize=12, pad=10)
+        ax.set_xlabel("x", color="#2c3e50", fontsize=11)
+        ax.set_ylabel("f(x)", color="#2c3e50", fontsize=11)
+        ax.tick_params(colors="#2c3e50", labelsize=9)
+        for sp in ax.spines.values(): sp.set_color("#bdc3c7")
+        ax.grid(True, color="#ecf0f1", linewidth=0.5, alpha=0.9)
+        ax.legend(facecolor="#ffffff", edgecolor="#bdc3c7", labelcolor="#2c3e50", fontsize=9)
+
+        tooltip = ax.annotate("", xy=(0,0), xytext=(14,14), textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.4", fc="#ffffff", ec="#3498db", lw=1.2),
+            arrowprops=dict(arrowstyle="->", color="#3498db"),
+            fontfamily="Consolas", fontsize=9, color="#2c3e50", zorder=10, visible=False)
+
+        def on_motion(event):
+            if event.inaxes != ax:
+                tooltip.set_visible(False); fig.canvas.draw_idle(); return
+            cx = event.xdata
+            try:
+                cy = safe_eval(float(cx), eq)
+                tooltip.set_text(f"x = {cx:.5f}\nf(x) = {cy:.5f}")
+                tooltip.xy = (cx, cy); tooltip.set_visible(True)
+            except: tooltip.set_visible(False)
+            hit = (ax.get_xlim()[1] - ax.get_xlim()[0]) * 0.015
+            for (xp, yp), lbl in zip(dot_xy, dot_labels):
+                if abs(cx - xp) < hit:
+                    try: fyp = safe_eval(float(xp), eq)
+                    except: fyp = yp
+                    tooltip.set_text(f"Iteration {lbl}\nx = {xp:.6f}\nf(x) = {fyp:.6f}")
+                    tooltip.xy = (xp, fyp); tooltip.set_visible(True); break
+            fig.canvas.draw_idle()
+
+        ZOOM = 1.25
+        def on_scroll(event):
+            if event.inaxes != ax: return
+            xd, yd = event.xdata, event.ydata
+            f = 1/ZOOM if event.button == "up" else ZOOM
+            ax.set_xlim([xd+(x-xd)*f for x in ax.get_xlim()])
+            ax.set_ylim([yd+(y-yd)*f for y in ax.get_ylim()])
+            redraw_curve(); fig.canvas.draw_idle()
+
+        _rs=[None]; _rp=[None]; _pan=[False]; _ps=[None]
+        def on_press(ev):
+            if ev.inaxes != ax: return
+            if ev.button == 1: _pan[0]=True; _ps[0]=(ev.xdata,ev.ydata,ax.get_xlim(),ax.get_ylim())
+            elif ev.button == 3:
+                _rs[0]=(ev.xdata,ev.ydata)
+                r=Rectangle((ev.xdata,ev.ydata),0,0,lw=1.2,ec="#3498db",fc="#3498db",alpha=0.15,zorder=20)
+                ax.add_patch(r); _rp[0]=r
+        def on_release(ev):
+            if ev.button==1: _pan[0]=False; _ps[0]=None
+            elif ev.button==3 and _rs[0]:
+                if _rp[0]: _rp[0].remove(); _rp[0]=None
+                x0,y0=_rs[0]; x1,y1=ev.xdata or x0,ev.ydata or y0; _rs[0]=None
+                if abs(x1-x0)>1e-9 and abs(y1-y0)>1e-9:
+                    ax.set_xlim(sorted([x0,x1])); ax.set_ylim(sorted([y0,y1])); redraw_curve()
+                fig.canvas.draw_idle()
+        def on_drag(ev):
+            if ev.inaxes != ax: return
+            if _pan[0] and _ps[0]:
+                x0,y0,xl,yl=_ps[0]
+                dx=ev.xdata-x0 if ev.xdata else 0; dy=ev.ydata-y0 if ev.ydata else 0
+                ax.set_xlim([xl[0]-dx,xl[1]-dx]); ax.set_ylim([yl[0]-dy,yl[1]-dy])
+                redraw_curve(); fig.canvas.draw_idle()
+            elif _rp[0] and _rs[0]:
+                x0,y0=_rs[0]; x1=ev.xdata or x0; y1=ev.ydata or y0
+                _rp[0].set_width(x1-x0); _rp[0].set_height(y1-y0); fig.canvas.draw_idle()
+
+        def redraw_curve():
+            xl,xr=ax.get_xlim(); m=(xr-xl)*0.05
+            xs,ys=build_curve(xl-m,xr+m); curve_line.set_data(xs,ys)
+
+        fig.canvas.mpl_connect("motion_notify_event", on_motion)
+        fig.canvas.mpl_connect("scroll_event", on_scroll)
+        fig.canvas.mpl_connect("button_press_event",   on_press)
+        fig.canvas.mpl_connect("button_release_event", on_release)
+        fig.canvas.mpl_connect("motion_notify_event",  on_drag)
+
+        btn_ax = fig.add_axes([0.40,0.02,0.20,0.045])
+        btn_ax.set_facecolor("#ecf0f1")
+        rb = Button(btn_ax,"Reset View",color="#ecf0f1",hovercolor="#d5dbdb")
+        rb.label.set_color("#2c3e50"); rb.label.set_fontfamily("Consolas"); rb.label.set_fontsize(10)
+        def on_reset(ev):
+            ax.set_xlim(X_MIN,X_MAX); xs,ys=build_curve(X_MIN,X_MAX); curve_line.set_data(xs,ys)
+            fin=ys[np.isfinite(ys)]
+            if len(fin):
+                m=(fin.max()-fin.min())*0.1 or 1; ax.set_ylim(fin.min()-m,fin.max()+m)
+            fig.canvas.draw_idle()
+        rb.on_clicked(on_reset)
+
+        sa=fig.add_axes([0.08,0.005,0.88,0.025]); sa.axis("off")
+        sa.text(0.5,0.5,"Scroll to zoom  |  Left-drag to pan  |  Right-drag to box-zoom  |  Hover for coords",
+                ha="center",va="center",color="#95a5a6",fontfamily="Consolas",fontsize=8,transform=sa.transAxes)
+
+        fin=y_vals[np.isfinite(y_vals)]
+        if len(fin):
+            m=(fin.max()-fin.min())*0.12 or 1; ax.set_ylim(fin.min()-m,fin.max()+m)
+        plt.show()
+    except ImportError:
+        messagebox.showinfo("Plot","Install matplotlib:\n  pip install matplotlib")
+
+
+# ─────────────────────────────────────────────
+#  WIDGET FACTORIES
+# ─────────────────────────────────────────────
+def make_label(parent, text, fg=TXT, bg=PNL, font_size=10, bold=False, **kw):
+    return tk.Label(parent, text=text, fg=fg, bg=bg,
+                    font=("Segoe UI", font_size, "bold" if bold else "normal"), **kw)
+
+def styled_button(parent, text, command, bg=BTN_CLR, fg=TXT, width=18, hover_bg=None):
+    hbg = hover_bg or ACC_R
+    b = tk.Button(parent, text=text, command=command,
+                  bg=bg, fg=fg, activebackground=hbg, activeforeground="#fff",
+                  font=("Segoe UI", 10, "bold"), relief="flat",
+                  cursor="hand2", width=width, borderwidth=0)
+    b.bind("<Enter>", lambda e: b.config(bg=hbg))
+    b.bind("<Leave>", lambda e: b.config(bg=bg))
+    return b
+
+
+# ─────────────────────────────────────────────
+#  BACKGROUND IMAGE MANAGER
+# ─────────────────────────────────────────────
+class BgImageManager:
+    def __init__(self):
+        self._root  = None
+        self._label = None
+        self._photo = None
+        self._path  = None
+
+    def attach(self, root, notebook):
+        self._root = root; self._notebook = notebook
+        self._label = tk.Label(root, bg=BG, bd=0, highlightthickness=0)
+        self._label.place(x=0, y=0, relwidth=1, relheight=1)
+        notebook.lift()
+        root.bind("<Configure>", self._on_resize)
+
+    def load(self, path):
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("Pillow missing",
+                "Install Pillow:\n  pip install pillow"); return
+        self._path = path; self._redraw()
+
+    def _redraw(self):
+        if not self._path or not self._label: return
+        self._root.update_idletasks()
+        w = self._root.winfo_width(); h = self._root.winfo_height()
+        if w < 10 or h < 10: return
+        try:
+            img = Image.open(self._path).convert("RGBA")
+            img = img.resize((w, h), Image.LANCZOS)
+            overlay = Image.new("RGBA", (w, h), (245, 247, 250, 180))
+            img = Image.alpha_composite(img, overlay).convert("RGB")
+            self._photo = ImageTk.PhotoImage(img)
+            self._label.config(image=self._photo)
+            self._notebook.lift()
+        except Exception as ex:
+            messagebox.showerror("Image Error", str(ex))
+
+    def _on_resize(self, event):
+        if self._path:
+            if hasattr(self, "_resize_job") and self._resize_job:
+                self._root.after_cancel(self._resize_job)
+            self._resize_job = self._root.after(80, self._redraw)
+
+    def clear(self):
+        self._path = None; self._photo = None
+        if self._label: self._label.config(image="")
+
+
+# ─────────────────────────────────────────────
+#  ROOT FINDING TAB
+# ─────────────────────────────────────────────
+class RootTab(tk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        left = tk.Frame(self, bg=PNL, width=320,
+                        highlightbackground=BORDER, highlightthickness=1)
+        left.pack(side="left", fill="y", padx=(8,4), pady=8)
+        left.pack_propagate(False)
+
+        tk.Frame(left, bg=ACC_R, height=3).pack(fill="x")
+        make_label(left, "ROOT FINDING", fg=ACC_R, bg=PNL,
+                   font_size=13, bold=True).pack(pady=(12,4))
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(0,8))
+
+        make_label(left, "f(x) equation", fg=TXT_DIM, bg=PNL, font_size=9).pack(anchor="w", padx=14)
+        self.eq_var = tk.StringVar(value="x**3 - x - 2")
+        tk.Entry(left, textvariable=self.eq_var,
+                 bg=ENTRY, fg=TXT, insertbackground=ACC_L,
+                 font=("Segoe UI",11), relief="flat",
+                 highlightthickness=1, highlightcolor=ACC_R,
+                 highlightbackground=BORDER, width=32
+                 ).pack(padx=14, pady=(2,8), ipady=5)
+
+        make_label(left, "Method", fg=TXT_DIM, bg=PNL, font_size=9).pack(anchor="w", padx=14)
+        self.method_var = tk.StringVar(value="Bisection")
+        methods = ["Bisection","False Position","Secant","Newton","Incremental"]
+
+        style = ttk.Style()
+        style.configure("Light.TCombobox",
+            fieldbackground=ENTRY, background=ENTRY, foreground=TXT,
+            selectbackground=ACC_R, selectforeground="#fff", arrowcolor=ACC_R)
+        style.map("Light.TCombobox",
+            fieldbackground=[("readonly", ENTRY)],
+            selectbackground=[("readonly", ACC_R)])
+
+        dd = ttk.Combobox(left, textvariable=self.method_var, values=methods,
+                          state="readonly", font=("Segoe UI",11), width=30,
+                          style="Light.TCombobox")
+        dd.pack(padx=14, pady=(2,10), ipady=3)
+        dd.bind("<<ComboboxSelected>>", lambda e: self.build_inputs())
+
+        self.input_frame = tk.Frame(left, bg=PNL)
+        self.input_frame.pack(fill="x", padx=14)
+        self.input_widgets = {}
+        self._last_rows=[]; self._last_cols=[]; self._last_method=""
+        self.build_inputs()
+
+        sf = tk.Frame(left, bg=PNL)
+        sf.pack(fill="x", padx=14, pady=(10,0))
+        tk.Frame(sf, bg=BORDER, height=1).pack(fill="x", pady=(0,8))
+
+        row0 = tk.Frame(sf, bg=PNL); row0.pack(fill="x")
+
+        tc = tk.Frame(row0, bg=PNL)
+        tc.pack(side="left", fill="x", expand=True, padx=(0,6))
+        make_label(tc, "Tolerance (Ea%)", fg=ACC_R, bg=PNL, font_size=9, bold=True).pack(anchor="w")
+        ti = tk.Frame(tc, bg=ENTRY, highlightbackground=BORDER, highlightthickness=1)
+        ti.pack(fill="x", ipady=1, pady=(2,0))
+        self.tol_var = tk.StringVar(value="0.001")
+        tk.Entry(ti, textvariable=self.tol_var, bg=ENTRY, fg=TXT, insertbackground=ACC_L,
+                 font=("Segoe UI",11), relief="flat", width=12).pack(side="left", padx=4, ipady=3)
+        tp = tk.Frame(tc, bg=PNL); tp.pack(fill="x", pady=(3,0))
+        for lbl, val in [("1%","1"),("0.1%","0.1"),("0.01%","0.01"),("0.001%","0.001")]:
+            b = tk.Button(tp, text=lbl, command=lambda v=val: self.tol_var.set(v),
+                          bg="#e8f4fc", fg=ACC_R, activebackground=ACC_R,
+                          activeforeground="#fff", font=("Segoe UI",8,"bold"),
+                          relief="flat", cursor="hand2", width=5)
+            b.pack(side="left", padx=1, ipady=2)
+        ic = tk.Frame(row0, bg=PNL); ic.pack(side="left", fill="x", expand=True)
+        make_label(ic, "Max Iterations", fg=ACC_R, bg=PNL, font_size=9, bold=True).pack(anchor="w")
+        ii = tk.Frame(ic, bg=ENTRY, highlightbackground=BORDER, highlightthickness=1)
+        ii.pack(fill="x", ipady=1, pady=(2,0))
+        self.maxiter_var = tk.StringVar(value="50")
+        tk.Entry(ii, textvariable=self.maxiter_var, bg=ENTRY, fg=TXT, insertbackground=ACC_L,
+                 font=("Segoe UI",11), relief="flat", width=12).pack(side="left", padx=4, ipady=3)
+        spf = tk.Frame(ic, bg=PNL); spf.pack(fill="x", pady=(3,0))
+        def chg(d):
+            try: self.maxiter_var.set(str(max(1, int(self.maxiter_var.get())+d)))
+            except: self.maxiter_var.set("50")
+        for lbl, d in [("-10",-10),("-1",-1),("+1",1),("+10",10)]:
+            b = tk.Button(spf, text=lbl, command=lambda x=d: chg(x),
+                          bg="#e8f4fc", fg=ACC_R, activebackground=ACC_R,
+                          activeforeground="#fff", font=("Segoe UI",8,"bold"),
+                          relief="flat", cursor="hand2", width=4)
+            b.pack(side="left", padx=1, ipady=2)
+        mf = tk.Frame(sf, bg=PNL); mf.pack(fill="x", pady=(8,0))
+        make_label(mf, "Stop when:", fg=TXT_DIM, bg=PNL, font_size=9).pack(side="left", padx=(0,6))
+        self.stop_mode = tk.StringVar(value="both")
+        for lbl, val in [("Tol met","tol"),("Max iter","iter"),("Either","both")]:
+            tk.Radiobutton(mf, text=lbl, variable=self.stop_mode, value=val,
+                           bg=PNL, fg=TXT, selectcolor="#e8f4fc",
+                           activebackground=PNL, activeforeground=ACC_R,
+                           font=("Segoe UI",9), relief="flat").pack(side="left", padx=3)
+        tk.Frame(sf, bg=BORDER, height=1).pack(fill="x", pady=(8,0))
+        bf = tk.Frame(left, bg=PNL); bf.pack(pady=10, padx=14, fill="x")
+        styled_button(bf, "SOLVE", self.do_solve, bg=BTN_SLV, fg="#fff", width=13,
+                      hover_bg="#2980b9").pack(side="left", padx=(0,4), ipady=6)
+        styled_button(bf, "PLOT",  self.do_plot,  bg=BTN_PLT, fg="#fff", width=13,
+                      hover_bg="#8e44ad").pack(side="left", ipady=6)
+        styled_button(left, "Clear / Return", self.do_clear,
+                      bg=BTN_CLR, fg=TXT_DIM, width=30, hover_bg="#d5dbdb"
+                      ).pack(padx=14, pady=(0,8), ipady=5)
+        rf = tk.Frame(left, bg="#e8f4fc",
+                      highlightbackground=ACC_R, highlightthickness=1)
+        rf.pack(padx=14, fill="x", pady=(0,8))
+        self.result_var = tk.StringVar(value="Root = ---")
+        tk.Label(rf, textvariable=self.result_var,
+                 bg="#e8f4fc", fg=ACC_R, font=("Segoe UI",10,"bold"),
+                 pady=6, wraplength=270, justify="center").pack(fill="x")
+        right = tk.Frame(self, bg=PNL,
+                         highlightbackground=BORDER, highlightthickness=1)
+        right.pack(side="left", fill="both", expand=True, padx=(4,8), pady=8)
+        self.tree_frame = tk.Frame(right, bg=PNL)
+        self.tree_frame.pack(fill="both", expand=True)
+        style.configure("NM.Treeview", background="#ffffff", foreground=TXT,
+                        fieldbackground="#ffffff", rowheight=28, borderwidth=0,
+                        relief="flat", font=("Segoe UI", 10))
+        style.configure("NM.Treeview.Heading", background="#ecf0f1",
+                        foreground=TXT, font=("Segoe UI", 10, "bold"))
+        style.map("NM.Treeview",
+            background=[("selected","#d6eaf8")],
+            foreground=[("selected",TXT)])
+        self.tree = ttk.Treeview(self.tree_frame, style="NM.Treeview",
+                                 show="headings", selectmode="browse")
+        vsb = ttk.Scrollbar(self.tree_frame, orient="vertical",   command=self.tree.yview)
+        hsb = ttk.Scrollbar(self.tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.tree_frame.rowconfigure(0, weight=1)
+        self.tree_frame.columnconfigure(0, weight=1)
+
+    def build_inputs(self):
+        for w in self.input_frame.winfo_children(): w.destroy()
+        self.input_widgets.clear()
+        defs = {
+            "Bisection":      [("XL","1"),("XU","2")],
+            "False Position": [("XL","-0.5"),("XU","1")],
+            "Secant":         [("Xi-1","1"),("Xi","2")],
+            "Newton":         [("Xi","1")],
+            "Incremental":    [("XL","0"),("Step","0.5")],
+        }[self.method_var.get()]
+        for label, default in defs:
+            make_label(self.input_frame, label, fg=ACC_R, bg=PNL,
+                       bold=True, font_size=9).pack(anchor="w", pady=(8,0))
+            e = tk.Entry(self.input_frame, bg=ENTRY, fg=TXT, insertbackground=ACC_L,
+                         font=("Segoe UI",12), relief="flat", width=32,
+                         highlightthickness=1, highlightcolor=ACC_R,
+                         highlightbackground=BORDER)
+            e.insert(0, default); e.pack(ipady=5, pady=(2,0))
+            self.input_widgets[label] = e
+
+    def get_input(self, label): return float(self.input_widgets[label].get())
+
+    def do_solve(self):
+        eq = self.eq_var.get().strip()
+        m  = self.method_var.get()
+        try:
+            try:
+                tol = float(self.tol_var.get())
+                if tol <= 0: raise ValueError
+            except ValueError:
+                messagebox.showerror("Input Error","Tolerance must be a positive number."); return
+            try:
+                max_iter = int(self.maxiter_var.get())
+                if max_iter < 1: raise ValueError
+            except ValueError:
+                messagebox.showerror("Input Error","Max Iterations must be a positive integer."); return
+            mode = self.stop_mode.get()
+            eff_tol      = tol      if mode in ("tol","both")  else 1e-300
+            eff_max_iter = max_iter if mode in ("iter","both") else 10_000
+            if m == "Bisection":
+                root,rows,cols = m_bisection(eq, self.get_input("XL"), self.get_input("XU"),
+                                             tol=eff_tol, max_iter=eff_max_iter)
+            elif m == "False Position":
+                root,rows,cols = m_false_pos(eq, self.get_input("XL"), self.get_input("XU"),
+                                             tol=eff_tol, max_iter=eff_max_iter)
+            elif m == "Secant":
+                root,rows,cols = m_secant(eq, self.get_input("Xi-1"), self.get_input("Xi"),
+                                          tol=eff_tol, max_iter=eff_max_iter)
+            elif m == "Newton":
+                root,rows,cols = m_newton(eq, self.get_input("Xi"),
+                                          tol=eff_tol, max_iter=eff_max_iter)
+            elif m == "Incremental":
+                root,rows,cols = m_incremental(eq, self.get_input("XL"), self.get_input("Step"),
+                                               tol=eff_tol, max_iter=eff_max_iter)
+            else:
+                raise ValueError("Unknown method")
+            self.populate_table(cols, rows)
+            self._last_rows=rows; self._last_cols=cols; self._last_method=m
+            n = len(rows)
+            stopped_by = "tolerance" if n < eff_max_iter else "max iterations"
+            self.result_var.set(
+                f"Root = {root:.6f}  [{n} iter, stopped by {stopped_by}]"
+                if root is not None else "No root found")
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex))
+
+    def populate_table(self, cols, rows):
+        self.tree.delete(*self.tree.get_children())
+        self.tree["columns"] = cols
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=max(80, len(c)*9), anchor="center")
+        for i, row in enumerate(rows):
+            tag = "even" if i%2==0 else "odd"
+            self.tree.insert("","end", values=row, tags=(tag,))
+        self.tree.tag_configure("even", background="#ffffff")
+        self.tree.tag_configure("odd",  background="#f8f9fa")
+
+    def do_clear(self):
+        self.tree.delete(*self.tree.get_children())
+        self.tree["columns"] = []
+        self.result_var.set("Root = ---")
+        self._last_rows=[]; self._last_cols=[]; self._last_method=""
+        self.build_inputs()
+
+    def do_plot(self):
+        eq = self.eq_var.get().strip()
+        rows = self._last_rows; method = self._last_method
+        col_map = {"Bisection":2,"False Position":3,"Secant":3,"Newton":1,"Incremental":3}
+        x_col = col_map.get(method, 1)
+        pts = []
+        for row in rows:
+            try: pts.append((int(row[0]), float(row[x_col])))
+            except: pass
+        t = threading.Thread(
+            target=do_plot,
+            args=(eq, pts or None, method),
+            daemon=True
+        )
+        t.start()
+
+
+# ─────────────────────────────────────────────
+#  MATRIX TAB
+# ─────────────────────────────────────────────
+class MatrixTab(tk.Frame):
+    OPS = [
+        # Topic 2 — Matrix Algebra
+        "Add A+B", "Subtract A-B", "Multiply A*B", "Multiply B*A",
+        "Transpose A", "Transpose B", "A^2", "B^2", "A^2 + B^2",
+        # Topic 3 — Determinants
+        "Det A (Cofactor)", "Det B (Cofactor)",
+        # Topic 4 — Inverse
+        "Cofactor Matrix A", "Adjoint A",
+        "Cofactor Matrix B", "Adjoint B",
+        "Inverse A (Adjoint)", "Inverse B (Adjoint)",
+    ]
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+
+        left = tk.Frame(self, bg=PNL, width=380,
+                        highlightbackground=BORDER, highlightthickness=1)
+        left.pack(side="left", fill="y", padx=(8,4), pady=8)
+        left.pack_propagate(False)
+
+        tk.Frame(left, bg=ACC_M, height=3).pack(fill="x")
+        make_label(left, "MATRIX OPERATIONS", fg=ACC_M, bg=PNL,
+                   font_size=13, bold=True).pack(pady=(12,2))
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(0,8))
+
+        for lbl_text, default, attr in [
+            ("Matrix A   (rows separated by ;)", "2 1 -3;1 2 -1;4 -1 2", "eA"),
+            ("Matrix B",                          "1 2 3;0 1 4;5 6 0",   "eB"),
+        ]:
+            make_label(left, lbl_text, fg=TXT_DIM, bg=PNL, font_size=9).pack(anchor="w", padx=14)
+            e = tk.Entry(left, bg=ENTRY, fg=TXT, insertbackground=ACC_M,
+                         font=("Consolas",10), relief="flat", width=42,
+                         highlightthickness=1, highlightcolor=ACC_M,
+                         highlightbackground=BORDER)
+            e.insert(0, default)
+            e.pack(padx=14, pady=(2,8), ipady=5)
+            setattr(self, attr, e)
+
+        # Scrollable button area
+        btn_wrap = tk.Frame(left, bg=PNL)
+        btn_wrap.pack(fill="both", expand=True, padx=(10,0), pady=(2,8))
+        canvas = tk.Canvas(btn_wrap, bg=PNL, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(btn_wrap, orient="vertical", command=canvas.yview)
+        sb.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=sb.set)
+        bg_grid = tk.Frame(canvas, bg=PNL)
+        canvas.create_window((0,0), window=bg_grid, anchor="nw")
+        bg_grid.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        for idx, op in enumerate(self.OPS):
+            r, c = divmod(idx, 2)
+            b = tk.Button(bg_grid, text=op,
+                          command=lambda o=op: self.do_matrix(o),
+                          bg="#fef5e7", fg=ACC_M,
+                          activebackground=ACC_M, activeforeground="#fff",
+                          font=("Segoe UI",9,"bold"), relief="flat",
+                          cursor="hand2", width=20, highlightthickness=0,
+                          anchor="w", padx=8)
+            b.grid(row=r, column=c, padx=3, pady=3, ipady=6, sticky="ew")
+            b.bind("<Enter>", lambda e, btn=b: btn.config(bg="#fdebd0"))
+            b.bind("<Leave>", lambda e, btn=b: btn.config(bg="#fef5e7"))
+
+        # Right panel — output
+        right = tk.Frame(self, bg=PNL,
+                         highlightbackground=BORDER, highlightthickness=1)
+        right.pack(side="left", fill="both", expand=True, padx=(4,8), pady=8)
+
+        hdr = tk.Frame(right, bg="#fef5e7", height=32,
+                       highlightbackground=BORDER, highlightthickness=1)
+        hdr.pack(fill="x", pady=(0,4)); hdr.pack_propagate(False)
+        make_label(hdr, "  Output Console (step-by-step)", fg=TXT_DIM, bg="#fef5e7",
+                   font_size=9).pack(side="left", pady=6)
+        styled_button(hdr, "Clear", lambda: self.write(""),
+                      bg="#fef5e7", fg=TXT_DIM, width=8,
+                      hover_bg="#fdebd0").pack(side="right", padx=4, pady=4)
+
+        self.out = scrolledtext.ScrolledText(
+            right, bg="#ffffff", fg=TXT,
+            font=("Consolas",11), relief="flat",
+            insertbackground=TXT,
+            selectbackground=ACC_M, selectforeground="#fff",
+            state="normal", padx=12, pady=10)
+        self.out.pack(fill="both", expand=True)
+        self.out.configure(state="disabled")
+
+    def write(self, text):
+        self.out.configure(state="normal")
+        self.out.delete("1.0","end")
+        self.out.insert("end", text)
+        self.out.configure(state="disabled")
+
+    def _need_square(self, M, name):
+        if M.shape[0] != M.shape[1]:
+            raise ValueError(f"{name} must be square.")
+
+    def do_matrix(self, op):
+        try:
+            A = parse_matrix(self.eA.get())
+            B = parse_matrix(self.eB.get())
+
+            out_text = ""
+
+            # ── Topic 2 ────────────────────────────────────
+            if op == "Add A+B":
+                if A.shape != B.shape: raise ValueError("Same dimensions required.")
+                out_text = f"A + B =\n{format_matrix(A + B)}"
+            elif op == "Subtract A-B":
+                if A.shape != B.shape: raise ValueError("Same dimensions required.")
+                out_text = f"A - B =\n{format_matrix(A - B)}"
+            elif op == "Multiply A*B":
+                if A.shape[1] != B.shape[0]:
+                    raise ValueError("Cols of A must equal rows of B.")
+                out_text = f"A x B =\n{format_matrix(A @ B)}"
+            elif op == "Multiply B*A":
+                if B.shape[1] != A.shape[0]:
+                    raise ValueError("Cols of B must equal rows of A.")
+                out_text = f"B x A =\n{format_matrix(B @ A)}"
+            elif op == "Transpose A":
+                out_text = f"A^T =\n{format_matrix(A.T)}"
+            elif op == "Transpose B":
+                out_text = f"B^T =\n{format_matrix(B.T)}"
+            elif op == "A^2":
+                self._need_square(A, "A")
+                out_text = f"A^2 =\n{format_matrix(A @ A)}"
+            elif op == "B^2":
+                self._need_square(B, "B")
+                out_text = f"B^2 =\n{format_matrix(B @ B)}"
+            elif op == "A^2 + B^2":
+                self._need_square(A, "A"); self._need_square(B, "B")
+                if A.shape != B.shape: raise ValueError("Same size required.")
+                out_text = f"A^2 + B^2 =\n{format_matrix(A@A + B@B)}"
+
+            # ── Topic 3 — Determinants ─────────────────────
+            elif op in ("Det A (Cofactor)", "Det B (Cofactor)"):
+                M = A if "A" in op else B
+                name = "A" if "A" in op else "B"
+                self._need_square(M, name)
+                if M.shape[0] == 1:
+                    val = float(M[0,0])
+                    out_text = f"|{name}| = {val:.4f}"
+                elif M.shape[0] == 2:
+                    val = float(M[0,0]*M[1,1] - M[0,1]*M[1,0])
+                    out_text = (f"|{name}| (2x2 formula: ad - bc)\n"
+                                f"  = ({M[0,0]:.2f})({M[1,1]:.2f}) - ({M[0,1]:.2f})({M[1,0]:.2f})\n"
+                                f"  = {val:.4f}")
+                else:
+                    val, steps = det_cofactor_expansion(M)
+                    out_text = (f"|{name}| via Cofactor Expansion (Laplace, 1st row):\n"
+                                + "\n".join(steps)
+                                + f"\n  {'─'*30}\n  |{name}| = {val:.4f}")
+
+            # ── Topic 4 — Cofactor / Adjoint / Inverse ─────
+            elif op in ("Cofactor Matrix A", "Cofactor Matrix B"):
+                M = A if "A" in op else B
+                name = "A" if "A" in op else "B"
+                self._need_square(M, name)
+                C = cofactor_matrix(M)
+                out_text = (f"Cofactor matrix of {name} "
+                            f"(Cij = (-1)^(i+j) * Mij):\n{format_matrix(C)}")
+
+            elif op in ("Adjoint A", "Adjoint B"):
+                M = A if "A" in op else B
+                name = "A" if "A" in op else "B"
+                self._need_square(M, name)
+                adj = adjoint_matrix(M)
+                out_text = (f"adj({name}) = transpose of cofactor matrix:\n"
+                            f"{format_matrix(adj)}")
+
+            elif op in ("Inverse A (Adjoint)", "Inverse B (Adjoint)"):
+                M = A if "A" in op else B
+                name = "A" if "A" in op else "B"
+                self._need_square(M, name)
+                d = np.linalg.det(M)
+                if abs(d) < 1e-12:
+                    raise ValueError(f"{name} is singular (|{name}| = 0). Inverse does not exist.")
+                adj = adjoint_matrix(M)
+                inv = adj / d
+                out_text = (f"|{name}| = {d:.4f}\n\n"
+                            f"adj({name}) =\n{format_matrix(adj)}\n\n"
+                            f"{name}^-1 = adj({name}) / |{name}| =\n{format_matrix(inv)}")
+
+            else:
+                raise ValueError("Unknown operation.")
+
+            self.write(f"Operation : {op}\n{'='*50}\n\n{out_text}\n")
+
+        except Exception as ex:
+            self.write(f"Error: {ex}")
+
+
+# ─────────────────────────────────────────────
+#  MAIN APPLICATION
+# ─────────────────────────────────────────────
+class NumericalMethodsApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("MATRIX SOLVER & ROOT FINDER")
+        self.geometry("1320x780")
+        self.configure(bg=BG)
+        self.resizable(True, True)
+        self.minsize(960, 600)
+
+        self.bg_mgr = BgImageManager()
+
+        # Status bar
+        statusbar = tk.Frame(self, bg="#ecf0f1", height=36)
+        statusbar.pack(side="bottom", fill="x")
+        statusbar.pack_propagate(False)
+        tk.Frame(statusbar, bg=ACC_R, width=4).pack(side="left", fill="y")
+        tk.Label(statusbar, text="  BACKGROUND IMAGE:",
+                 bg="#ecf0f1", fg=TXT_DIM,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(8, 4))
+
+        def sb_btn(text, cmd, is_blue=False):
+            base  = "#3498db" if is_blue else "#7398b1"
+            hover = "#2980b9" if is_blue else "#95a5a6"
+            fg_c  = "#ffffff" if is_blue else TXT
+            b = tk.Button(statusbar, text=text, command=cmd,
+                          bg=base, fg=fg_c,
+                          activebackground=hover, activeforeground="#ffffff",
+                          font=("Segoe UI", 9, "bold"), relief="flat",
+                          cursor="hand2", borderwidth=0, padx=14, pady=6)
+            b.pack(side="left", padx=3, pady=4)
+            b.bind("<Enter>", lambda e: b.config(bg=hover))
+            b.bind("<Leave>", lambda e: b.config(bg=base))
+            return b
+
+        sb_btn("Set Image", self._pick_bg, is_blue=True)
+        sb_btn("Remove BG", self._clear_bg)
+
+        if not PIL_AVAILABLE:
+            tk.Label(statusbar,
+                     text="  install pillow to enable: pip install pillow",
+                     bg="#ecf0f1", fg="#95a5a6",
+                     font=("Segoe UI", 8)).pack(side="left", padx=8)
+
+        # Notebook styles
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TNotebook", background=BG, borderwidth=0,
+                        tabmargins=[10, 10, 10, 0])
+        style.configure("TNotebook.Tab", background="#ecf0f1",
+                        foreground="#7f8c8d", font=("Segoe UI", 11, "bold"),
+                        padding=[22, 12], borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", "#3498db"), ("active", "#5dade2")],
+                  foreground=[("selected", "#ffffff"), ("active", "#ffffff")])
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True)
+        nb.add(RootTab(nb),   text="  Root Finding  ")
+        nb.add(MatrixTab(nb), text="  Matrix Operations  ")
+
+        self.bg_mgr.attach(self, nb)
+
+    def _pick_bg(self):
+        path = filedialog.askopenfilename(
+            title="Choose Background Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tiff"),
+                       ("All files", "*.*")])
+        if path:
+            self.bg_mgr.load(path)
+
+    def _clear_bg(self):
+        self.bg_mgr.clear()
+
+
+if __name__ == "__main__":
+    app = NumericalMethodsApp()
+    app.mainloop()
