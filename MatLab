@@ -1,0 +1,635 @@
+function numerical_methods_gui()
+
+fig = uifigure('Name','TNC PROTEIN','Position',[100 80 1100 700]);
+fig.Color = [1 0.5 0.8];
+
+tabg = uitabgroup(fig,'Position',[0 0 1100 700]);
+
+t1 = uitab(tabg,'Title','Root Finding');
+t1.BackgroundColor = [0 0.7 0.7];
+buildRootTab(t1, fig);
+
+t2 = uitab(tabg,'Title','Matrix Operations');
+t2.BackgroundColor = [1 1 0.8];
+buildMatrixTab(t2);
+
+end
+
+
+function buildRootTab(parent, fig)
+
+PNL  = [0.8 0.5 0.51];
+ACC  = [0.18 0.72 0.53];
+TXT  = [0.95 0.95 0.95];
+FONT = 'Consolas';
+
+menu = uipanel(parent,'Position',[10 10 310 660],...
+    'BackgroundColor',PNL,'BorderType','none');
+
+uilabel(menu,'Position',[10 625 290 28],...
+    'Text','ROOT FINDING','FontName',FONT,...
+    'FontSize',13,'FontWeight','bold',...
+    'FontColor',ACC,'BackgroundColor',PNL);
+
+uilabel(menu,'Position',[10 598 290 18],...
+    'Text','f(x) equation:','FontName',FONT,...
+    'FontColor',TXT,'BackgroundColor',PNL);
+
+uilabel(menu,'Position',[10 580 290 16],...
+    'Text','  e.g.  sin(x)-x/2   ln(x)-1   exp(x)-3','FontName',FONT,...
+    'FontSize',8,'FontColor',[0.55 0.75 0.65],'BackgroundColor',PNL);
+
+eqBox = uieditfield(menu,'text','Position',[10 554 290 26],...
+    'Value','x^3 - x - 2','FontName',FONT,...
+    'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT);
+
+uilabel(menu,'Position',[10 524 290 22],...
+    'Text','Method:','FontName',FONT,...
+    'FontColor',TXT,'BackgroundColor',PNL);
+
+ddMethod = uidropdown(menu,'Position',[10 500 290 26],...
+    'Items',{'Bisection','False Position','Secant','Newton','Incremental'},...
+    'Value','Bisection','FontName',FONT,...
+    'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT);
+
+inputPanel = uipanel(menu,'Position',[0 240 310 255],...
+    'BackgroundColor',PNL,'BorderType','none');
+
+inputFields = struct();
+
+% Store last solve results for plotting
+lastIterX  = [];   % x-values at each iteration
+lastIterFX = [];   % f(x) values at each iteration
+lastEq     = '';
+lastMethod = '';
+
+    function buildInputs()
+        delete(inputPanel.Children);
+        inputFields = struct();
+        m = ddMethod.Value;
+        switch m
+            case {'Bisection','False Position'}
+                labs = {'XL',   'XU'  };
+                keys = {'XL',   'XU'  };
+                defs = {1, 2};
+            case 'Secant'
+                labs = {'Xi-1', 'Xi'  };
+                keys = {'Xim1', 'Xi'  };
+                defs = {1, 2};
+            case 'Newton'
+                labs = {'Xi'};
+                keys = {'Xi'};
+                defs = {1};
+            case 'Incremental'
+                labs = {'XL',   'Step'};
+                keys = {'XL',   'Step'};
+                defs = {0, 0.5};
+        end
+        ystart = 215;
+        for k = 1:numel(labs)
+            uilabel(inputPanel,'Position',[10 ystart-55*(k-1) 290 22],...
+                'Text',labs{k},'FontName',FONT,...
+                'FontColor',ACC,'BackgroundColor',PNL,...
+                'FontWeight','bold');
+            inputFields.(keys{k}) = uieditfield(inputPanel,'numeric',...
+                'Position',[10 ystart-55*(k-1)-26 290 28],...
+                'Value',defs{k},'FontName',FONT,...
+                'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT,...
+                'FontSize',13);
+        end
+    end
+
+ddMethod.ValueChangedFcn = @(~,~) buildInputs();
+buildInputs();
+
+btnSolve = uibutton(menu,'Position',[10 200 140 34],...
+    'Text','SOLVE','FontName',FONT,'FontWeight','bold',...
+    'BackgroundColor',ACC,'FontColor',[0 0 0]);
+
+btnPlot = uibutton(menu,'Position',[160 200 140 34],...
+    'Text','PLOT','FontName',FONT,'FontWeight','bold',...
+    'BackgroundColor',[0.22 0.50 0.80],'FontColor',TXT);
+
+btnClear = uibutton(menu,'Position',[10 158 290 32],...
+    'Text','Clear / Return','FontName',FONT,...
+    'BackgroundColor',[0.40 0.20 0.20],'FontColor',TXT);
+
+resultLabel = uilabel(menu,'Position',[10 100 290 52],...
+    'Text','Root = ---','FontName',FONT,'FontSize',12,...
+    'FontWeight','bold','FontColor',ACC,...
+    'BackgroundColor',[0.14 0.16 0.21],...
+    'HorizontalAlignment','center','WordWrap','on');
+
+tbl = uitable(parent,'Position',[330 10 755 660],...
+    'FontName',FONT,'FontSize',10,...
+    'RowStriping','on');
+
+    % ------------------------------------------------------------------
+    % Extract the x-value used at each iteration from the table data T
+    % col index depends on method
+    % ------------------------------------------------------------------
+    function iterX = extractIterX(T, method)
+        switch method
+            case 'Bisection'
+                col = 3;   % XR column
+            case 'False Position'
+                col = 4;   % XR column
+            case 'Secant'
+                col = 4;   % Xi+1
+            case 'Newton'
+                col = 2;   % Xi
+            case 'Incremental'
+                col = 3;   % XU (upper bracket = x0+step)
+            otherwise
+                col = 2;
+        end
+        iterX = zeros(size(T,1),1);
+        for r = 1:size(T,1)
+            iterX(r) = str2double(T{r,col});
+        end
+    end
+
+    function doSolve(~,~)
+        eq = eqBox.Value;
+        m  = ddMethod.Value;
+        try
+            switch m
+                case 'Bisection'
+                    xl = inputFields.XL.Value;
+                    xu = inputFields.XU.Value;
+                    [rootv, T, cols] = mBisection(eq, xl, xu);
+                case 'False Position'
+                    xl = inputFields.XL.Value;
+                    xu = inputFields.XU.Value;
+                    [rootv, T, cols] = mFalsePos(eq, xl, xu);
+                case 'Secant'
+                    x0 = inputFields.Xim1.Value;
+                    x1 = inputFields.Xi.Value;
+                    [rootv, T, cols] = mSecant(eq, x0, x1);
+                case 'Newton'
+                    x0 = inputFields.Xi.Value;
+                    [rootv, T, cols] = mNewton(eq, x0);
+                case 'Incremental'
+                    xl   = inputFields.XL.Value;
+                    step = inputFields.Step.Value;
+                    [rootv, T, cols] = mIncremental(eq, xl, step);
+            end
+            tbl.Data       = T;
+            tbl.ColumnName = cols;
+
+            % --- store iteration data for plotting ---
+            lastEq     = eq;
+            lastMethod = m;
+            lastIterX  = extractIterX(T, m);
+            lastIterFX = zeros(size(lastIterX));
+            for r = 1:numel(lastIterX)
+                try
+                    lastIterFX(r) = feval_safe(lastIterX(r), eq);
+                catch
+                    lastIterFX(r) = NaN;
+                end
+            end
+
+            if isempty(rootv)
+                resultLabel.Text = 'No root found';
+            else
+                resultLabel.Text = sprintf('Root = %.8f', rootv);
+            end
+        catch ex
+            uialert(fig, ex.message, 'Error');
+        end
+    end
+
+    function doClear(~,~)
+        tbl.Data       = {};
+        tbl.ColumnName = {};
+        resultLabel.Text = 'Root = ---';
+        lastIterX  = [];
+        lastIterFX = [];
+        lastEq     = '';
+        lastMethod = '';
+        buildInputs();
+    end
+
+    % ------------------------------------------------------------------
+    % PLOT — shows curve + colour-coded iteration points
+    % ------------------------------------------------------------------
+    function doPlot(~,~)
+        eq = eqBox.Value;
+        if isempty(eq)
+            uialert(fig, 'Enter an equation first.', 'Plot Error');
+            return;
+        end
+
+        try
+            % --- build smooth curve ---
+            xRange = linspace(-10, 10, 2000);
+            yRange = arrayfun(@(v) feval_safe_nan(v, eq), xRange);
+
+            % --- open figure ---
+            hFig = figure('Name', ['f(x) = ' eq], ...
+                          'Color', [0.12 0.14 0.18], ...
+                          'NumberTitle', 'off', ...
+                          'Position', [200 150 860 560]);
+            ax = axes(hFig, 'Color', [0.12 0.14 0.18], ...
+                      'XColor', [0.80 0.80 0.80], ...
+                      'YColor', [0.80 0.80 0.80], ...
+                      'GridColor', [0.30 0.30 0.30], ...
+                      'GridAlpha', 0.4, ...
+                      'FontName', 'Consolas', 'FontSize', 10);
+            hold(ax, 'on');
+            grid(ax, 'on');
+
+            % zero axes
+            yline(ax, 0, 'Color', [0.6 0.6 0.6], 'LineStyle', '--', 'LineWidth', 0.8);
+            xline(ax, 0, 'Color', [0.6 0.6 0.6], 'LineStyle', '--', 'LineWidth', 0.8);
+
+            % main curve — split on NaN gaps so discontinuities show properly
+            plot(ax, xRange, yRange, 'Color', [0.18 0.72 0.53], ...
+                 'LineWidth', 2.2, 'DisplayName', ['f(x) = ' eq]);
+
+            % --- draw iteration points if a solve was run ---
+            nIter = numel(lastIterX);
+            if nIter > 0 && strcmp(lastEq, eq)
+
+                % colour ramp: light blue → deep blue across iterations
+                cStart = [0.55 0.80 1.00];
+                cEnd   = [0.05 0.25 0.75];
+
+                for k = 1:nIter
+                    t = (k-1) / max(nIter-1, 1);   % 0 → 1
+                    col = (1-t)*cStart + t*cEnd;
+                    xk  = lastIterX(k);
+                    yk  = lastIterFX(k);
+
+                    if isnan(yk), continue; end
+
+                    % vertical drop line to x-axis
+                    plot(ax, [xk xk], [0 yk], ...
+                         'Color', [col 0.35], ...
+                         'LineWidth', 0.8, 'HandleVisibility', 'off');
+
+                    % the point itself
+                    scatter(ax, xk, yk, 70, col, 'filled', ...
+                            'MarkerEdgeColor', [0.9 0.9 0.9], ...
+                            'LineWidth', 0.6, 'HandleVisibility', 'off');
+
+                    % iteration number label
+                    text(ax, xk, yk, sprintf('  %d', k), ...
+                         'Color', [0.95 0.95 0.95], ...
+                         'FontName', 'Consolas', 'FontSize', 8, ...
+                         'VerticalAlignment', 'bottom');
+                end
+
+                % highlight the final (converged) point
+                xF = lastIterX(end);
+                yF = lastIterFX(end);
+                if ~isnan(yF)
+                    scatter(ax, xF, yF, 130, [1.00 0.75 0.10], 'filled', ...
+                            'MarkerEdgeColor', [1 1 1], 'LineWidth', 1.2, ...
+                            'DisplayName', sprintf('Root \\approx %.6f', xF));
+                end
+
+                % colour bar legend note
+                annotation(hFig, 'textbox', [0.13 0.01 0.5 0.04], ...
+                    'String', 'Iteration colour: light blue (early) \rightarrow deep blue (late)  |  Gold = final', ...
+                    'Color', [0.7 0.7 0.7], 'FontName', 'Consolas', 'FontSize', 8, ...
+                    'EdgeColor', 'none', 'BackgroundColor', 'none');
+            else
+                % no iteration data — plain curve only
+                annotation(hFig, 'textbox', [0.13 0.01 0.5 0.04], ...
+                    'String', 'Tip: press SOLVE first, then PLOT to see iteration progress', ...
+                    'Color', [0.7 0.7 0.7], 'FontName', 'Consolas', 'FontSize', 8, ...
+                    'EdgeColor', 'none', 'BackgroundColor', 'none');
+            end
+
+            xlabel(ax, 'x', 'Color', [0.9 0.9 0.9], 'FontName', 'Consolas');
+            ylabel(ax, 'f(x)', 'Color', [0.9 0.9 0.9], 'FontName', 'Consolas');
+            titleStr = ['f(x) = ' eq];
+            if ~isempty(lastMethod) && strcmp(lastEq, eq)
+                titleStr = [titleStr '   [' lastMethod '  —  ' num2str(nIter) ' iterations]'];
+            end
+            title(ax, titleStr, 'Color', [0.18 0.72 0.53], ...
+                  'FontName', 'Consolas', 'FontSize', 12);
+            legend(ax, 'Location', 'best', 'TextColor', [0.9 0.9 0.9], ...
+                   'Color', [0.18 0.21 0.28], 'EdgeColor', [0.35 0.38 0.45]);
+            hold(ax, 'off');
+
+        catch ex
+            uialert(fig, ex.message, 'Plot Error');
+        end
+    end
+
+btnSolve.ButtonPushedFcn = @doSolve;
+btnPlot.ButtonPushedFcn  = @doPlot;
+btnClear.ButtonPushedFcn = @doClear;
+
+end % buildRootTab
+
+
+function buildMatrixTab(parent)
+
+PNL  = [1 0.8 0.52];
+ACC  = [0.85 0.60 0.15];
+TXT  = [0.95 0.95 0.95];
+FONT = 'Consolas';
+
+lp = uipanel(parent,'Position',[10 10 340 660],...
+    'BackgroundColor',PNL,'BorderType','none');
+
+uilabel(lp,'Position',[10 625 320 28],...
+    'Text','MATRIX OPERATIONS','FontName',FONT,...
+    'FontSize',13,'FontWeight','bold',...
+    'FontColor',ACC,'BackgroundColor',PNL);
+
+uilabel(lp,'Position',[10 595 320 22],...
+    'Text','Matrix A  (example: 1 2;3 4)','FontName',FONT,...
+    'FontColor',TXT,'BackgroundColor',PNL);
+
+eA = uieditfield(lp,'text','Position',[10 570 320 26],...
+    'Value','1 2;3 4','FontName',FONT,...
+    'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT);
+
+uilabel(lp,'Position',[10 538 320 22],...
+    'Text','Matrix B','FontName',FONT,...
+    'FontColor',TXT,'BackgroundColor',PNL);
+
+eB = uieditfield(lp,'text','Position',[10 513 320 26],...
+    'Value','5 6;7 8','FontName',FONT,...
+    'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT);
+
+uilabel(lp,'Position',[10 481 320 22],...
+    'Text','b vector for Ax=b  (example: 2 3)','FontName',FONT,...
+    'FontColor',TXT,'BackgroundColor',PNL);
+
+eBv = uieditfield(lp,'text','Position',[10 456 320 26],...
+    'Value','5 6','FontName',FONT,...
+    'BackgroundColor',[0.24 0.28 0.36],'FontColor',TXT);
+
+outBox = uitextarea(parent,'Position',[365 10 720 660],...
+    'FontName',FONT,'FontSize',11,...
+    'BackgroundColor',[0.14 0.17 0.22],...
+    'FontColor',TXT,'Editable',false);
+
+ops = { ...
+    'Add A+B',       'Multiply A*B', ...
+    'Multiply B*A',  'Transpose A', ...
+    'Transpose B',   'Determinant A', ...
+    'Determinant B', 'Inverse A', ...
+    'Inverse B',     'Adjoint A', ...
+    'Adjoint B',     'A^2', ...
+    'B^2',           'A^2 + B^2', ...
+    'Solve Ax=b',    'Subtract A-B', ...
+    'Subtract B-A'};
+
+yp = 415;
+for k = 1:numel(ops)
+    row = ceil(k/2);
+    col = mod(k-1,2);
+    uibutton(lp,'Position',[10+col*165 yp-40*(row-1) 158 32],...
+        'Text',ops{k},'FontName',FONT,...
+        'BackgroundColor',[0.24 0.28 0.36],...
+        'FontColor',ACC,'FontWeight','bold',...
+        'ButtonPushedFcn',@(~,~) doMatrix(ops{k}));
+end
+
+uibutton(lp,'Position',[10 30 320 32],...
+    'Text','Clear / Return','FontName',FONT,...
+    'BackgroundColor',[0.40 0.20 0.20],'FontColor',TXT,...
+    'ButtonPushedFcn',@(~,~) set(outBox,'Value',{''}));
+
+    function doMatrix(op)
+        try
+            A  = parseMatrix(eA.Value);
+            B  = parseMatrix(eB.Value);
+            bv = str2num(eBv.Value); %#ok<ST2NM>
+            switch op
+                case 'Add A+B'
+                    if ~isequal(size(A),size(B)), error('Matrices must have same dimensions.'); end
+                    R = A + B;
+                case 'Subtract A-B' 
+                    if ~isequal(size(A),size(B)), error('Matrices must have same dimensions.'); end
+                    R = A - B;
+                case 'Subtract B-A'
+                    if ~isequal(size(A),size(B)), error('Matrices must have same dimensions.'); end
+                    R = B - A;
+                case 'Multiply A*B'
+                    if size(A,2)~=size(B,1), error('Columns of A must equal rows of B.'); end
+                    R = A * B;
+                case 'Multiply B*A'
+                    if size(B,2)~=size(A,1), error('Columns of B must equal rows of A.'); end
+                    R = B * A;
+                case 'Transpose A',   R = A';
+                case 'Transpose B',   R = B';
+                case 'Determinant A'
+                    if size(A,1)~=size(A,2), error('Matrix A must be square.'); end
+                    R = det(A);
+                case 'Determinant B'
+                    if size(B,1)~=size(B,2), error('Matrix B must be square.'); end
+                    R = det(B);
+                case 'Inverse A'
+                    if abs(det(A))<eps, error('Matrix A is singular.'); end
+                    R = inv(A);
+                case 'Inverse B'
+                    if abs(det(B))<eps, error('Matrix B is singular.'); end
+                    R = inv(B);
+                case 'Adjoint A'
+                    if abs(det(A))<eps, error('Matrix A is singular.'); end
+                    R = det(A) * inv(A);
+                case 'Adjoint B'
+                    if abs(det(B))<eps, error('Matrix B is singular.'); end
+                    R = det(B) * inv(B);
+                case 'A^2'
+                    if size(A,1)~=size(A,2), error('Matrix A must be square.'); end
+                    R = A^2;
+                case 'B^2'
+                    if size(B,1)~=size(B,2), error('Matrix B must be square.'); end
+                    R = B^2;
+                case 'A^2 + B^2'
+                    if size(A,1)~=size(A,2), error('Matrix A must be square.'); end
+                    if size(B,1)~=size(B,2), error('Matrix B must be square.'); end
+                    if ~isequal(size(A),size(B)), error('Matrices must have same size.'); end
+                    R = A^2 + B^2;
+                case 'Solve Ax=b'
+                    if size(A,1)~=length(bv), error('b vector size mismatch.'); end
+                    R = A \ bv(:);
+                            end
+            outBox.Value = formatResult(op,R);
+        catch ex
+            outBox.Value = {['Error: ' ex.message]};
+        end
+    end
+
+end % buildMatrixTab
+
+
+
+% ======================================================================
+%  ROOT-FINDING METHODS
+% ======================================================================
+
+function [rootv, T, cols] = mBisection(eq, xl, xu)
+T = {}; xr_old = NaN;
+cols = {'Iter','XL','XR','XU','f(XL)','f(XR)','Ea','f(XL)*f(XR)','Remark'};
+for i = 1:100
+    xr  = (xl+xu)/2;
+    fxl = feval_safe(xl,eq);
+    fxr = feval_safe(xr,eq);
+    ea  = 0;
+    if ~isnan(xr_old) && xr~=0, ea = abs((xr-xr_old)/xr)*100; end
+    prod_ = fxl*fxr;
+    rem_  = pick(prod_<0,'Left','Right');
+    T(end+1,:) = {i,fmt(xl),fmt(xr),fmt(xu),fmt(fxl),fmt(fxr),fmt(ea),fmt(prod_),rem_}; %#ok
+    if stopCrit(ea,fxr), break; end
+    if prod_<0, xu=xr; else, xl=xr; end
+    xr_old = xr;
+end
+rootv = str2double(T{end,3});
+end
+
+function [rootv, T, cols] = mFalsePos(eq, xl, xu)
+T = {}; xr_old = NaN;
+cols = {'Iter','XL','XU','XR','Ea','f(XL)','f(XU)','f(XR)','f(XL)*f(XR)'};
+for i = 1:100
+    fxl = feval_safe(xl,eq); fxu = feval_safe(xu,eq);
+    xr  = xu - fxu*(xl-xu)/(fxl-fxu);
+    fxr = feval_safe(xr,eq);
+    ea  = 0;
+    if ~isnan(xr_old) && xr~=0, ea = abs((xr-xr_old)/xr)*100; end
+    prod_ = fxl*fxr;
+    T(end+1,:) = {i,fmt(xl),fmt(xu),fmt(xr),fmt(ea),fmt(fxl),fmt(fxu),fmt(fxr),fmt(prod_)}; %#ok
+    if stopCrit(ea,fxr), break; end
+    if prod_<0, xu=xr; else, xl=xr; end
+    xr_old = xr;
+end
+rootv = str2double(T{end,4});
+end
+
+function [rootv, T, cols] = mSecant(eq, x0, x1)
+T = {};
+cols = {'Iter','Xi-1','Xi','Xi+1','Ea','f(Xi-1)','f(Xi)','f(Xi+1)'};
+for i = 1:100
+    f0 = feval_safe(x0,eq); f1 = feval_safe(x1,eq);
+    if abs(f0-f1) < eps, error('Division by zero in Secant method.'); end
+    x2 = x1 - f1*(x0-x1)/(f0-f1);
+    f2 = feval_safe(x2,eq);
+    ea = 0; if x2~=0, ea = abs((x2-x1)/x2)*100; end
+    T(end+1,:) = {i,fmt(x0),fmt(x1),fmt(x2),fmt(ea),fmt(f0),fmt(f1),fmt(f2)}; %#ok
+    if stopCrit(ea,f2), break; end
+    x0=x1; x1=x2;
+end
+rootv = str2double(T{end,4});
+end
+
+function [rootv, T, cols] = mNewton(eq, x0)
+T = {};
+cols = {'Iter','Xi','Ea','f(x)','f''(x)'};
+for i = 1:100
+    fx  = feval_safe(x0,eq);
+    dfx = numDeriv(x0,eq);
+    if abs(dfx) < eps, error('Zero derivative in Newton method.'); end
+    x1  = x0 - fx/dfx;
+    ea  = 0; if x1~=0, ea = abs((x1-x0)/x1)*100; end
+    T(end+1,:) = {i,fmt(x0),fmt(ea),fmt(fx),fmt(dfx)}; %#ok
+    if stopCrit(ea,fx), break; end
+    x0 = x1;
+end
+rootv = str2double(T{end,2});
+end
+
+function [rootv, T, cols] = mIncremental(eq, x0, step)
+T = {}; rootv = [];
+cols = {'Iter','XL','DX','XU','f(XL)','f(XU)','f(XL)*f(XU)','Remark'};
+for i = 1:200
+    x1    = x0 + step;
+    f0    = feval_safe(x0,eq);
+    f1    = feval_safe(x1,eq);
+    prod_ = f0*f1;
+    rem_  = pick(prod_<0,'Root exists','No root');
+    T(end+1,:) = {i,fmt(x0),fmt(step),fmt(x1),fmt(f0),fmt(f1),fmt(prod_),rem_}; %#ok
+    if abs(f1)<0.001 || prod_<0
+        rootv = (x0+x1)/2; return;
+    end
+    x0 = x1;
+end
+end
+
+
+% ======================================================================
+%  SHARED UTILITIES
+% ======================================================================
+
+function eq2 = preprocessEq(eq)
+    eq2 = strtrim(eq);
+    eq2 = strrep(eq2, '**', '^');
+    eq2 = regexprep(eq2, '\bln\s*\(', 'log(');
+    eq2 = regexprep(eq2, '(?<![a-zA-Z0-9_])e\^(\([^)]*\))', 'exp$1');
+    eq2 = regexprep(eq2, '(?<![a-zA-Z0-9_])e\^(-?[0-9]+\.?[0-9]*)', 'exp($1)');
+    eq2 = regexprep(eq2, '(?<![a-zA-Z0-9_])e\^([a-zA-Z_]\w*)', 'exp($1)');
+    eq2 = regexprep(eq2, '(?<![a-zA-Z0-9_])e(?![a-zA-Z0-9_(^])', 'exp(1)');
+    eq2 = regexprep(eq2, '(\d)([a-zA-Z(])', '$1*$2');
+    eq2 = regexprep(eq2, '\)\s*\(', ')*(');
+    eq2 = vectorize(eq2);
+end
+
+function y = feval_safe(x, eq)
+    try
+        eq2 = preprocessEq(eq);
+        f   = str2func(['@(x) ' eq2]);
+        y   = f(x);
+        if ~isscalar(y) || ~isreal(y) || isnan(y) || isinf(y)
+            error('Non-real/NaN/Inf result at x=%g.', x);
+        end
+    catch ME
+        error('Cannot evaluate f(%g): %s', x, ME.message);
+    end
+end
+
+% Silent version — returns NaN instead of throwing (used for plotting)
+function y = feval_safe_nan(x, eq)
+    try
+        y = feval_safe(x, eq);
+    catch
+        y = NaN;
+    end
+end
+
+function d = numDeriv(x, eq)
+    h = 1e-7;
+    d = (feval_safe(x+h, eq) - feval_safe(x-h, eq)) / (2*h);
+end
+
+function ok = stopCrit(ea, val)
+    ok = abs(val) < 1e-10 || (ea ~= 0 && ea < 1e-6);
+end
+
+function s = fmt(v)
+    if ischar(v) || isstring(v)
+        s = char(v);
+    else
+        s = sprintf('%.6f', v);
+    end
+end
+
+function out = pick(cond, a, b)
+    if cond, out = a; else, out = b; end
+end
+
+function M = parseMatrix(txt)
+    txt = strtrim(txt);
+    txt = regexprep(txt, '\s+', ' ');
+    M   = str2num(['[' txt ']']); %#ok<ST2NM>
+    if isempty(M), error('Invalid matrix format.'); end
+end
+
+function lines = formatResult(op, R)
+    lines = {['Operation: ' op], ''};
+    if isscalar(R)
+        lines{end+1} = sprintf('Result: %.6f', R);
+    else
+        lines{end+1} = 'Result:';
+        for i = 1:size(R,1)
+            lines{end+1} = strjoin(arrayfun(@(v) sprintf('%14.6f',v), R(i,:), 'UniformOutput',false),'  '); %#ok
+        end
+    end
+end
